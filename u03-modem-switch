@@ -3,14 +3,16 @@
 
 set -Eeuo pipefail
 
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly VENDOR_ID="19d2"
 readonly PID_STORAGE="1484"
 readonly PID_RNDIS="1483"
 readonly PID_MODEM="1481"
+readonly PID_DIAG="0016"
 readonly DEVICE_IP_DEFAULT="192.168.100.1"
 readonly HOST_IP_DEFAULT="192.168.100.3"
 readonly AUTH_SALT="94CB8A5309AF41BDBFC855A9BF2A3A5E"
+readonly DEVICE_HOST="speedusb-stick.home"
 readonly REFERER="http://speedusb-stick.home/index.html"
 readonly MSG1="5553424312345678000000000000061b000000020000000000000000000000"
 readonly MSG2="55534243876543212000000080000c85010101180101010101000000000000"
@@ -21,7 +23,9 @@ HOST_IP="$HOST_IP_DEFAULT"
 REQUESTED_IFACE=""
 ASSUME_YES=0
 STATUS_ONLY=0
+TARGET_MODE="modem"
 NETNS=""
+AT_FD=""
 
 log()  { printf '[u03] %s\n' "$*" >&2; }
 warn() { printf '[u03] warning: %s\n' "$*" >&2; }
@@ -30,14 +34,17 @@ die()  { printf '[u03] error: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage:
-  sudo ./u03-modem-switch [--yes] [--interface IFACE]
+  sudo ./u03-modem-switch [--to-modem] [--yes] [--interface IFACE]
+  sudo ./u03-modem-switch --to-rndis [--yes]
   ./u03-modem-switch --status
 
-Enable persistent USB modem mode on the au ZTE Speed USB STICK U03 (MF871).
+Switch the au ZTE Speed USB STICK U03 (MF871) between RNDIS and modem mode.
 
 Options:
   -y, --yes              Skip the interactive confirmation.
   -s, --status           Only detect and report the current USB mode.
+      --to-modem         Enable persistent modem mode (default).
+      --to-rndis         Restore persistent RNDIS/Web UI mode.
   -i, --interface NAME   Use this RNDIS network interface.
       --device-ip ADDR   Device Web UI address (default: 192.168.100.1).
       --host-ip ADDR     Temporary host address (default: 192.168.100.3).
@@ -45,7 +52,7 @@ Options:
       --version          Show the version.
 
 The switch changes persistent device configuration and reboots the USB device.
-Only USB IDs 19d2:1484 and 19d2:1483 are modified. 19d2:1481 is the target.
+Only the au U03 IDs 19d2:1484, 1483, 1481, and recovery ID 0016 are handled.
 EOF
 }
 
@@ -53,6 +60,8 @@ while (($#)); do
     case "$1" in
         -y|--yes) ASSUME_YES=1; shift ;;
         -s|--status) STATUS_ONLY=1; shift ;;
+        --to-modem) TARGET_MODE="modem"; shift ;;
+        --to-rndis) TARGET_MODE="rndis"; shift ;;
         -i|--interface)
             (($# >= 2)) || die "$1 requires an argument"
             REQUESTED_IFACE="$2"; shift 2 ;;
@@ -81,7 +90,7 @@ scan_supported_devices() {
         read -r product < "$path/idProduct"
         product="${product,,}"
         case "$product" in
-            "$PID_STORAGE"|"$PID_RNDIS"|"$PID_MODEM"|0016)
+            "$PID_STORAGE"|"$PID_RNDIS"|"$PID_MODEM"|"$PID_DIAG")
                 printf '%s\t%s\n' "$path" "$product"
                 ;;
         esac
@@ -113,7 +122,7 @@ mode_name() {
         "$PID_STORAGE") printf 'virtual CD-ROM' ;;
         "$PID_RNDIS") printf 'RNDIS/Web UI' ;;
         "$PID_MODEM") printf 'modem' ;;
-        0016) printf 'factory/diagnostic' ;;
+        "$PID_DIAG") printf 'factory/diagnostic' ;;
         *) printf 'unknown' ;;
     esac
 }
@@ -136,15 +145,28 @@ show_status() {
 confirm_switch() {
     ((ASSUME_YES)) && return 0
     [[ -t 0 ]] || die "refusing a non-interactive mode change without --yes"
-    cat >&2 <<'EOF'
+    if [[ "$TARGET_MODE" == "rndis" ]]; then
+        cat >&2 <<'EOF'
+
+This will restore the U03 RNDIS/Web UI USB composition and reboot it.
+Firmware variants other than the tested au U03/MF871 may behave differently.
+Type RNDIS to continue:
+EOF
+    else
+        cat >&2 <<'EOF'
 
 This will persistently change the U03 USB composition and reboot it.
 Firmware variants other than the tested au U03/MF871 may behave differently.
 Type SWITCH to continue:
 EOF
+    fi
     local answer
     read -r answer
-    [[ "$answer" == "SWITCH" ]] || die "cancelled"
+    if [[ "$TARGET_MODE" == "rndis" ]]; then
+        [[ "$answer" == "RNDIS" ]] || die "cancelled"
+    else
+        [[ "$answer" == "SWITCH" ]] || die "cancelled"
+    fi
 }
 
 wait_for_product() {
@@ -159,15 +181,119 @@ wait_for_product() {
 }
 
 switch_storage_to_rndis() {
+    local alternate_product="${1:-}"
     need_command usb_modeswitch
     log "switching 19d2:$PID_STORAGE from virtual CD-ROM to RNDIS"
     usb_modeswitch \
         -v "0x$VENDOR_ID" -p "0x$PID_STORAGE" \
         -V "0x$VENDOR_ID" -P "0x$PID_RNDIS" \
         -M "$MSG1" -2 "$MSG2" -n
-    wait_for_product "$PID_RNDIS" "$PID_MODEM" || \
+    wait_for_product "$PID_RNDIS" "$alternate_product" || \
         die "USB device did not re-enumerate as 19d2:$PID_RNDIS"
     log "device is now 19d2:$PRODUCT_ID ($(mode_name "$PRODUCT_ID"))"
+}
+
+find_at_port() {
+    local interface_number path port
+    case "$PRODUCT_ID" in
+        "$PID_MODEM") interface_number=0 ;;
+        "$PID_DIAG") interface_number=2 ;;
+        *) return 1 ;;
+    esac
+
+    path="$USB_PATH/${USB_PATH##*/}:1.$interface_number"
+    for port in "$path"/ttyUSB*; do
+        [[ -e "$port" ]] || continue
+        printf '/dev/%s\n' "${port##*/}"
+        return 0
+    done
+    return 1
+}
+
+open_at_port() {
+    local i
+    modprobe option 2>/dev/null || true
+    for ((i=0; i<40; i++)); do
+        if AT_PORT=$(find_at_port); then
+            break
+        fi
+        AT_PORT=""
+        sleep 0.25
+    done
+    [[ -n "$AT_PORT" ]] || die "could not find the U03 AT port"
+
+    need_command stty
+    # USB serial transport does not depend on a UART baud-rate setting. The
+    # option driver used by this device rejects attempts to set one explicitly.
+    stty -F "$AT_PORT" raw -echo 2>/dev/null || \
+        die "could not configure AT port: $AT_PORT"
+    exec {AT_FD}<>"$AT_PORT" || die "could not open AT port: $AT_PORT"
+    log "using AT port: $AT_PORT"
+}
+
+close_at_port() {
+    if [[ -n "$AT_FD" ]]; then
+        exec {AT_FD}>&- || true
+        AT_FD=""
+    fi
+}
+
+send_at() {
+    local command="$1" required_text="${2:-}" line response="" i
+    printf '%s\r' "$command" >&"$AT_FD" || die "failed to send $command"
+
+    for ((i=0; i<50; i++)); do
+        if IFS= read -r -t 0.2 line <&"$AT_FD"; then
+            line=${line//$'\r'/}
+            [[ -n "$line" ]] || continue
+            response+="$line"$'\n'
+            case "$line" in
+                OK) break ;;
+                ERROR|+CME\ ERROR:*|+CMS\ ERROR:*)
+                    die "$command was rejected: $line"
+                    ;;
+            esac
+        fi
+    done
+
+    [[ "$response" == *$'OK\n'* ]] || die "no OK response to $command"
+    if [[ -n "$required_text" && "$response" != *"$required_text"* ]]; then
+        die "unexpected response to $command: ${response//$'\n'/ }"
+    fi
+}
+
+switch_modem_to_rndis() {
+    local i
+    open_at_port
+
+    log "disabling the persistent KDDI/CPE modem product mode"
+    send_at 'AT+ZCPE=o' 'exit cpe mode result(0:FAIL 1:SUCCESS):1'
+    send_at 'AT+ZCDRUN=8' 'Close autorun state result(0:FAIL 1:SUCCESS):1'
+    send_at 'AT+ZCDRUN=F' 'exit download mode result(0:FAIL 1:SUCCESS):1'
+    log "device accepted the settings; requesting reboot"
+    send_at 'AT+ZRST'
+    close_at_port
+
+    log "waiting for RNDIS USB ID 19d2:$PID_RNDIS"
+    wait_for_product "$PID_RNDIS" "$PID_STORAGE" || \
+        die "settings were accepted, but neither 19d2:$PID_RNDIS nor 19d2:$PID_STORAGE appeared"
+
+    if [[ "$PRODUCT_ID" == "$PID_STORAGE" ]]; then
+        # Give an installed usb-modeswitch udev rule time to handle the CD-ROM first.
+        for ((i=0; i<12; i++)); do
+            sleep 0.5
+            if try_select_device && [[ "$PRODUCT_ID" == "$PID_RNDIS" ]]; then
+                break
+            fi
+        done
+    fi
+    if [[ "$PRODUCT_ID" == "$PID_STORAGE" ]]; then
+        switch_storage_to_rndis
+    fi
+
+    [[ "$PRODUCT_ID" == "$PID_RNDIS" ]] || \
+        die "rollback did not reach RNDIS mode; current state is 19d2:$PRODUCT_ID"
+    log "success: U03 is in persistent RNDIS/Web UI mode (19d2:$PID_RNDIS)"
 }
 
 find_rndis_interface() {
@@ -198,6 +324,7 @@ api_curl() {
     ip netns exec "$NETNS" curl \
         --silent --show-error --connect-timeout 3 --max-time 10 \
         --interface "$RNDIS_IFACE" \
+        -H "Host: $DEVICE_HOST" \
         -H "Referer: $REFERER" \
         -H 'X-Requested-With: XMLHttpRequest' \
         -H 'Accept: application/json, text/javascript, */*; q=0.01' \
@@ -309,23 +436,46 @@ if ((STATUS_ONLY)); then
     exit 0
 fi
 
-if [[ "$PRODUCT_ID" == "$PID_MODEM" ]]; then
+if [[ "$TARGET_MODE" == "rndis" && "$PRODUCT_ID" == "$PID_RNDIS" ]]; then
+    log "already in RNDIS/Web UI mode; nothing to change"
+    show_status
+    exit 0
+fi
+if [[ "$TARGET_MODE" == "modem" && "$PRODUCT_ID" == "$PID_MODEM" ]]; then
     log "already in modem mode; nothing to change"
     show_status
     exit 0
 fi
-[[ "$PRODUCT_ID" != 0016 ]] || \
-    die "device is in factory/diagnostic mode (19d2:0016); this tool will not modify it"
+if [[ "$TARGET_MODE" == "modem" && "$PRODUCT_ID" == "$PID_DIAG" ]]; then
+    die "device is in factory/diagnostic mode (19d2:$PID_DIAG); use --to-rndis to recover it"
+fi
 
 ((EUID == 0)) || die "mode switching requires root; run with sudo"
+confirm_switch
+
+if [[ "$TARGET_MODE" == "rndis" ]]; then
+    if [[ "$PRODUCT_ID" == "$PID_STORAGE" ]]; then
+        switch_storage_to_rndis "$PID_MODEM"
+    fi
+    if [[ "$PRODUCT_ID" == "$PID_RNDIS" ]]; then
+        log "success: U03 is in persistent RNDIS/Web UI mode (19d2:$PID_RNDIS)"
+        show_status
+        exit 0
+    fi
+    [[ "$PRODUCT_ID" == "$PID_MODEM" || "$PRODUCT_ID" == "$PID_DIAG" ]] || \
+        die "unexpected USB state: 19d2:$PRODUCT_ID"
+    switch_modem_to_rndis
+    show_status
+    exit 0
+fi
+
 need_command curl
 need_command ip
 need_command md5sum
 need_command awk
-confirm_switch
 
 if [[ "$PRODUCT_ID" == "$PID_STORAGE" ]]; then
-    switch_storage_to_rndis
+    switch_storage_to_rndis "$PID_MODEM"
 fi
 if [[ "$PRODUCT_ID" == "$PID_MODEM" ]]; then
     log "already reached modem mode after USB re-enumeration"

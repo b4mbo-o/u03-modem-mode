@@ -3,7 +3,7 @@
 [![shellcheck](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml)
 [![release](https://img.shields.io/github/v/release/b4mbo-o/u03-modem-mode)](https://github.com/b4mbo-o/u03-modem-mode/releases)
 
-auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードから永続的なUSBモデムモードへ切り替えるLinux用ツールです。
+auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードとUSBモデムモードの間で永続的に切り替えるLinux用ツールです。元のRNDIS/Web UIモードへの復帰にも対応します。
 
 > [!WARNING]
 > 端末内に保存されるUSB構成を変更します。au U03/MF871の実機1台で確認していますが、すべてのファームウェアを保証するものではありません。実行は自己責任でお願いします。
@@ -14,7 +14,8 @@ auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDIS
 |---|---|
 | `19d2:1484` | 仮想CD-ROM |
 | `19d2:1483` | RNDIS/Web UI |
-| `19d2:1481` | モデム（目標） |
+| `19d2:1481` | モデム（AT + MODEM/PPP） |
+| `19d2:0016` | 診断／復旧用 |
 
 切替後は通常、次のポートが現れます。
 
@@ -52,10 +53,10 @@ cd u03-modem-mode
 ./u03-modem-switch --status
 ```
 
-切り替える場合：
+モデムモードへ切り替える場合（`--to-modem`は省略可能）：
 
 ```console
-sudo ./u03-modem-switch
+sudo ./u03-modem-switch --to-modem
 ```
 
 確認を省略する場合：
@@ -65,6 +66,14 @@ sudo ./u03-modem-switch --yes
 ```
 
 成功時はUSB IDが`19d2:1481`になります。
+
+元のRNDIS/Web UIモードへ戻す場合：
+
+```console
+sudo ./u03-modem-switch --to-rndis
+```
+
+成功時はUSB IDが`19d2:1483`になります。確認を省略する場合は同様に`--yes`を追加できます。復帰処理は工場出荷時リセットではないため、APN設定は消去しません。
 
 ```console
 lsusb -d 19d2:
@@ -92,6 +101,8 @@ U03のWeb UIは`192.168.100.1`を使います。PC側LANも`192.168.100.0/24`の
 3. 端末Web UIと同じ方法で`AD`を生成する
 4. KDDI向け製品モード設定`SET_PRODUCT_MODE_FOR_KDDI`を送る
 5. 新しいトークンで再起動し、`1481`への再列挙を確認する
+
+RNDISへ戻す場合は、`1481`のATポートからCPE/KDDI製品モードを解除し、仮想CD-ROMと診断モードを無効化して再起動します。途中で`1484`になった場合は、USB Mass Storageメッセージで`1483`まで進めます。診断用`0016`に入ってしまった端末も`--to-rndis`で復旧できます。
 
 詳細は[docs/protocol.md](docs/protocol.md)にまとめています。
 
@@ -121,7 +132,13 @@ dmesg | tail -50
 
 ### 元に戻したい
 
-初版では、未検証の自動ロールバックを提供していません。純正ツールまたは端末固有のATコマンドが必要です。確実な復帰手順を複数実機で検証できたら追加予定です。
+次を実行してください。
+
+```console
+sudo ./u03-modem-switch --to-rndis
+```
+
+`could not find the U03 AT port`と表示された場合は、`sudo modprobe option`を実行してから再試行してください。ModemManagerなどがATポートを使用中の場合は、その接続を切ってから実行します。
 
 ## 調査資料
 
