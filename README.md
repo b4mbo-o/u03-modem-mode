@@ -1,5 +1,8 @@
 # au ZTE U03 Modem Mode Switch for Linux
 
+[![shellcheck](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml)
+[![release](https://img.shields.io/github/v/release/b4mbo-o/u03-modem-mode)](https://github.com/b4mbo-o/u03-modem-mode/releases)
+
 auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードから永続的なUSBモデムモードへ切り替えるLinux用ツールです。
 
 > [!WARNING]
