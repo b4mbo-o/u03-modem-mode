@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+
+set -Eeuo pipefail
+
+readonly VERSION="0.1.0"
+readonly VENDOR_ID="19d2"
+readonly PID_STORAGE="1484"
+readonly PID_RNDIS="1483"
+readonly PID_MODEM="1481"
+readonly DEVICE_IP_DEFAULT="192.168.100.1"
+readonly HOST_IP_DEFAULT="192.168.100.3"
+readonly AUTH_SALT="94CB8A5309AF41BDBFC855A9BF2A3A5E"
+readonly REFERER="http://speedusb-stick.home/index.html"
+readonly MSG1="5553424312345678000000000000061b000000020000000000000000000000"
+readonly MSG2="55534243876543212000000080000c85010101180101010101000000000000"
+
+SYSFS_USB_ROOT="${U03_SYSFS_USB_ROOT:-/sys/bus/usb/devices}"
+DEVICE_IP="$DEVICE_IP_DEFAULT"
+HOST_IP="$HOST_IP_DEFAULT"
+REQUESTED_IFACE=""
+ASSUME_YES=0
+STATUS_ONLY=0
+NETNS=""
+
+log()  { printf '[u03] %s\n' "$*" >&2; }
+warn() { printf '[u03] warning: %s\n' "$*" >&2; }
+die()  { printf '[u03] error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage:
+  sudo ./u03-modem-switch [--yes] [--interface IFACE]
+  ./u03-modem-switch --status
+
+Enable persistent USB modem mode on the au ZTE Speed USB STICK U03 (MF871).
+
+Options:
+  -y, --yes              Skip the interactive confirmation.
+  -s, --status           Only detect and report the current USB mode.
+  -i, --interface NAME   Use this RNDIS network interface.
+      --device-ip ADDR   Device Web UI address (default: 192.168.100.1).
+      --host-ip ADDR     Temporary host address (default: 192.168.100.3).
+  -h, --help             Show this help.
+      --version          Show the version.
+
+The switch changes persistent device configuration and reboots the USB device.
+Only USB IDs 19d2:1484 and 19d2:1483 are modified. 19d2:1481 is the target.
+EOF
+}
+
+while (($#)); do
+    case "$1" in
+        -y|--yes) ASSUME_YES=1; shift ;;
+        -s|--status) STATUS_ONLY=1; shift ;;
+        -i|--interface)
+            (($# >= 2)) || die "$1 requires an argument"
+            REQUESTED_IFACE="$2"; shift 2 ;;
+        --device-ip)
+            (($# >= 2)) || die "$1 requires an argument"
+            DEVICE_IP="$2"; shift 2 ;;
+        --host-ip)
+            (($# >= 2)) || die "$1 requires an argument"
+            HOST_IP="$2"; shift 2 ;;
+        --version) printf '%s\n' "$VERSION"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+need_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+scan_supported_devices() {
+    local path vendor product
+    for path in "$SYSFS_USB_ROOT"/*; do
+        [[ -f "$path/idVendor" && -f "$path/idProduct" ]] || continue
+        read -r vendor < "$path/idVendor"
+        [[ "${vendor,,}" == "$VENDOR_ID" ]] || continue
+        read -r product < "$path/idProduct"
+        product="${product,,}"
+        case "$product" in
+            "$PID_STORAGE"|"$PID_RNDIS"|"$PID_MODEM"|0016)
+                printf '%s\t%s\n' "$path" "$product"
+                ;;
+        esac
+    done
+}
+
+select_device() {
+    local -a found=()
+    mapfile -t found < <(scan_supported_devices)
+    ((${#found[@]} > 0)) || die "no supported ZTE U03 USB ID found"
+    ((${#found[@]} == 1)) || {
+        printf '%s\n' "${found[@]}" >&2
+        die "multiple candidate devices found; leave only one U03 connected"
+    }
+    USB_PATH=${found[0]%%$'\t'*}
+    PRODUCT_ID=${found[0]##*$'\t'}
+}
+
+try_select_device() {
+    local -a found=()
+    mapfile -t found < <(scan_supported_devices)
+    ((${#found[@]} == 1)) || return 1
+    USB_PATH=${found[0]%%$'\t'*}
+    PRODUCT_ID=${found[0]##*$'\t'}
+}
+
+mode_name() {
+    case "$1" in
+        "$PID_STORAGE") printf 'virtual CD-ROM' ;;
+        "$PID_RNDIS") printf 'RNDIS/Web UI' ;;
+        "$PID_MODEM") printf 'modem' ;;
+        0016) printf 'factory/diagnostic' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+show_status() {
+    select_device
+    printf 'USB ID: %s:%s\n' "$VENDOR_ID" "$PRODUCT_ID"
+    printf 'Mode:   %s\n' "$(mode_name "$PRODUCT_ID")"
+    if [[ "$PRODUCT_ID" == "$PID_MODEM" ]]; then
+        local ports
+        ports=$(find -H "$USB_PATH" -name 'ttyUSB*' -printf '/dev/%f\n' 2>/dev/null | sort -u || true)
+        if [[ -n "$ports" ]]; then
+            printf 'Ports:\n%s\n' "$ports"
+        else
+            printf 'Ports:  not bound yet (try: sudo modprobe option)\n'
+        fi
+    fi
+}
+
+confirm_switch() {
+    ((ASSUME_YES)) && return 0
+    [[ -t 0 ]] || die "refusing a non-interactive mode change without --yes"
+    cat >&2 <<'EOF'
+
+This will persistently change the U03 USB composition and reboot it.
+Firmware variants other than the tested au U03/MF871 may behave differently.
+Type SWITCH to continue:
+EOF
+    local answer
+    read -r answer
+    [[ "$answer" == "SWITCH" ]] || die "cancelled"
+}
+
+wait_for_product() {
+    local wanted1="$1" wanted2="${2:-}" i
+    for ((i=0; i<80; i++)); do
+        if try_select_device; then
+            [[ "$PRODUCT_ID" == "$wanted1" || ( -n "$wanted2" && "$PRODUCT_ID" == "$wanted2" ) ]] && return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+switch_storage_to_rndis() {
+    need_command usb_modeswitch
+    log "switching 19d2:$PID_STORAGE from virtual CD-ROM to RNDIS"
+    usb_modeswitch \
+        -v "0x$VENDOR_ID" -p "0x$PID_STORAGE" \
+        -V "0x$VENDOR_ID" -P "0x$PID_RNDIS" \
+        -M "$MSG1" -2 "$MSG2" -n
+    wait_for_product "$PID_RNDIS" "$PID_MODEM" || \
+        die "USB device did not re-enumerate as 19d2:$PID_RNDIS"
+    log "device is now 19d2:$PRODUCT_ID ($(mode_name "$PRODUCT_ID"))"
+}
+
+find_rndis_interface() {
+    local candidate path
+    if [[ -n "$REQUESTED_IFACE" ]]; then
+        [[ -e "/sys/class/net/$REQUESTED_IFACE" ]] || \
+            die "network interface not found: $REQUESTED_IFACE"
+        printf '%s\n' "$REQUESTED_IFACE"
+        return
+    fi
+    for path in "$USB_PATH"/*/net/*; do
+        [[ -e "$path" ]] || continue
+        candidate=${path##*/}
+        printf '%s\n' "$candidate"
+        return
+    done
+    return 1
+}
+
+cleanup_netns() {
+    if [[ -n "$NETNS" ]] && ip netns list 2>/dev/null | awk '{print $1}' | grep -Fxq "$NETNS"; then
+        ip netns delete "$NETNS" >/dev/null 2>&1 || true
+    fi
+    NETNS=""
+}
+
+api_curl() {
+    ip netns exec "$NETNS" curl \
+        --silent --show-error --connect-timeout 3 --max-time 10 \
+        --interface "$RNDIS_IFACE" \
+        -H "Referer: $REFERER" \
+        -H 'X-Requested-With: XMLHttpRequest' \
+        -H 'Accept: application/json, text/javascript, */*; q=0.01' \
+        "$@"
+}
+
+get_rd() {
+    local response
+    response=$(api_curl \
+        "http://$DEVICE_IP/goform/goform_get_cmd_process?isTest=false&cmd=RD&multi_data=1&_=$(date +%s%N)") || return 1
+    if [[ "$response" =~ \"RD\"[[:space:]]*:[[:space:]]*\"([0-9A-Fa-f]{32})\" ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    warn "unexpected RD response: $response"
+    return 1
+}
+
+make_ad() {
+    printf '%s' "$AUTH_SALT$1" | md5sum | awk '{print $1}'
+}
+
+response_is_success() {
+    local compact=${1//[[:space:]]/}
+    [[ "$compact" == *'"result":"success"'* ]]
+}
+
+switch_rndis_to_modem() {
+    local rd ad response reboot_rc i
+
+    RNDIS_IFACE=$(find_rndis_interface) || die "could not find the U03 RNDIS interface"
+    log "using RNDIS interface: $RNDIS_IFACE"
+
+    NETNS="u03-switch-$$"
+    trap cleanup_netns EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ip netns add "$NETNS"
+    ip link set dev "$RNDIS_IFACE" down
+    ip link set dev "$RNDIS_IFACE" netns "$NETNS"
+    ip -n "$NETNS" link set lo up
+    ip -n "$NETNS" addr flush dev "$RNDIS_IFACE"
+    ip -n "$NETNS" addr add "$HOST_IP/24" dev "$RNDIS_IFACE"
+    ip -n "$NETNS" link set "$RNDIS_IFACE" up
+
+    log "waiting for the Web UI at $DEVICE_IP"
+    for ((i=0; i<20; i++)); do
+        if rd=$(get_rd 2>/dev/null); then
+            break
+        fi
+        rd=""
+        sleep 0.5
+    done
+    [[ -n "$rd" ]] || die "the Web UI did not return a valid RD token"
+
+    ad=$(make_ad "$rd")
+    log "enabling the persistent KDDI modem product mode"
+    response=$(api_curl \
+        -X POST \
+        --data "isTest=false&goformId=SET_PRODUCT_MODE_FOR_KDDI&debug_enable=1&AD=$ad" \
+        "http://$DEVICE_IP/goform/goform_set_cmd_process") || \
+        die "mode-switch API request failed"
+    response_is_success "$response" || die "device rejected the mode switch: $response"
+
+    rd=$(get_rd) || die "could not obtain a fresh RD token for reboot"
+    ad=$(make_ad "$rd")
+    log "device accepted the setting; requesting reboot"
+    set +e
+    response=$(api_curl \
+        -X POST \
+        --data "isTest=false&goformId=REBOOT_DEVICE&AD=$ad" \
+        "http://$DEVICE_IP/goform/goform_set_cmd_process")
+    reboot_rc=$?
+    set -e
+    if ((reboot_rc != 0)); then
+        log "Web UI disconnected during reboot (expected)"
+    elif [[ -n "$response" ]] && ! response_is_success "$response"; then
+        warn "unexpected reboot response: $response"
+    fi
+
+    cleanup_netns
+    trap - EXIT INT TERM
+
+    log "waiting for modem USB ID 19d2:$PID_MODEM"
+    wait_for_product "$PID_MODEM" || \
+        die "setting was accepted, but 19d2:$PID_MODEM did not appear; unplug and reconnect the U03"
+
+    modprobe option 2>/dev/null || true
+    for ((i=0; i<20; i++)); do
+        find -H "$USB_PATH" -name 'ttyUSB*' -print -quit 2>/dev/null | grep -q . && break
+        sleep 0.25
+    done
+
+    log "success: U03 is in persistent modem mode (19d2:$PID_MODEM)"
+    local ports
+    ports=$(find -H "$USB_PATH" -name 'ttyUSB*' -printf '/dev/%f\n' 2>/dev/null | sort -u || true)
+    if [[ -n "$ports" ]]; then
+        printf '%s\n' "$ports"
+    else
+        warn "modem ID appeared, but no ttyUSB ports are bound; check the kernel option driver"
+    fi
+}
+
+select_device
+log "found 19d2:$PRODUCT_ID ($(mode_name "$PRODUCT_ID")) at ${USB_PATH##*/}"
+
+if ((STATUS_ONLY)); then
+    show_status
+    exit 0
+fi
+
+if [[ "$PRODUCT_ID" == "$PID_MODEM" ]]; then
+    log "already in modem mode; nothing to change"
+    show_status
+    exit 0
+fi
+[[ "$PRODUCT_ID" != 0016 ]] || \
+    die "device is in factory/diagnostic mode (19d2:0016); this tool will not modify it"
+
+((EUID == 0)) || die "mode switching requires root; run with sudo"
+need_command curl
+need_command ip
+need_command md5sum
+need_command awk
+confirm_switch
+
+if [[ "$PRODUCT_ID" == "$PID_STORAGE" ]]; then
+    switch_storage_to_rndis
+fi
+if [[ "$PRODUCT_ID" == "$PID_MODEM" ]]; then
+    log "already reached modem mode after USB re-enumeration"
+    show_status
+    exit 0
+fi
+[[ "$PRODUCT_ID" == "$PID_RNDIS" ]] || die "unexpected USB state: 19d2:$PRODUCT_ID"
+
+switch_rndis_to_modem
