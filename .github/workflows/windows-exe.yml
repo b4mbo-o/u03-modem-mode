@@ -12,6 +12,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          sparse-checkout: windows/U03ModemSwitch
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x

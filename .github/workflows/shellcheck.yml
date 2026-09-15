@@ -48,6 +48,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          sparse-checkout: u03-modem-switch.ps1
+          sparse-checkout-cone-mode: false
       - name: Check with Windows PowerShell 5.1
         shell: powershell
         run: |
