@@ -20,5 +20,54 @@ jobs:
           python3 -m py_compile u03-sms-receive
           shellcheck u03-modem-switch
           shellcheck tests/smoke.sh
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $parseErrors = @()
+          foreach ($script in @("u03-modem-switch.ps1")) {
+            $tokens = $null
+            $errorsForFile = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              "$PWD/$script",
+              [ref]$tokens,
+              [ref]$errorsForFile
+            ) | Out-Null
+            $parseErrors += $errorsForFile
+          }
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | Format-List
+            exit 1
+          }
+          if ((./u03-modem-switch.ps1 -Version) -ne "0.4.0-dev") {
+            throw "unexpected Windows tool version"
+          }
       - name: Smoke test CLI
         run: tests/smoke.sh
+
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $parseErrors = @()
+          foreach ($script in @("u03-modem-switch.ps1")) {
+            $tokens = $null
+            $errorsForFile = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              "$PWD/$script",
+              [ref]$tokens,
+              [ref]$errorsForFile
+            ) | Out-Null
+            $parseErrors += $errorsForFile
+          }
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | Format-List
+            exit 1
+          }
+          $version = powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\u03-modem-switch.ps1 -Version
+          if ($version -ne "0.4.0-dev") {
+            throw "unexpected Windows tool version: $version"
+          }

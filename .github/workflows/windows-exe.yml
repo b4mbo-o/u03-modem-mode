@@ -1,0 +1,24 @@
+name: windows-exe
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Build Windows GUI
+        run: dotnet build windows/U03ModemSwitch/U03ModemSwitch.csproj --configuration Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: U03ModemSwitch-windows
+          path: windows/U03ModemSwitch/bin/Release/net48/U03ModemSwitch.exe
+          if-no-files-found: error

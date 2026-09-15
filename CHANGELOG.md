@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add a standalone C# Windows Forms EXE with status, modem, rollback, and log-copy controls.
+- Embed automatic UAC elevation in the EXE; no adjacent PowerShell files are required.
+- Build and verify the Windows EXE in GitHub Actions and attach it to tagged releases.
+- Add a Windows PowerShell 5.1 CLI as a troubleshooting fallback.
+- Support status detection and best-effort modem-to-RNDIS rollback through a ZTE COM port.
+- Bind Windows Web UI requests to the U03 RNDIS address to avoid same-subnet misrouting.
+- Document the Windows driver requirement and the unsupported native `1484` USB bulk transition.
+
 ## 0.3.0 - 2026-09-15
 
 - Add `u03-sms-receive` to configure and read SMS in modem mode.

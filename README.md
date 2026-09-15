@@ -1,9 +1,10 @@
-# au ZTE U03 Modem Mode Switch for Linux
+# au ZTE U03 Modem Mode Switch for Linux and Windows
 
 [![shellcheck](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml)
+[![windows-exe](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/windows-exe.yml/badge.svg)](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/windows-exe.yml)
 [![release](https://img.shields.io/github/v/release/b4mbo-o/u03-modem-mode)](https://github.com/b4mbo-o/u03-modem-mode/releases)
 
-auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードとUSBモデムモードの間で永続的に切り替えるLinux用ツールです。元のRNDIS/Web UIモードへの復帰と、モデムモードでの実験的なSMS受信にも対応します。
+auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードとUSBモデムモードの間で永続的に切り替えるLinux／Windows用ツールです。元のRNDIS/Web UIモードへの復帰と、Linuxのモデムモードでの実験的なSMS受信にも対応します。
 
 > [!WARNING]
 > 端末内に保存されるUSB構成を変更します。au U03/MF871の実機1台で確認していますが、すべてのファームウェアを保証するものではありません。実行は自己責任でお願いします。
@@ -88,6 +89,48 @@ sudo picocom -b 115200 /dev/ttyUSB0
 ```
 
 接続後に`AT`を入力し、`OK`が返れば認識できています。
+
+## Windows版（GUI）
+
+Windows 10／11では、[Releases](https://github.com/b4mbo-o/u03-modem-mode/releases)から`U03ModemSwitch.exe`をダウンロードしてダブルクリックします。UACの確認後、現在の状態を自動取得し、「モデムモードへ」「RNDISへ戻す」のボタンで操作できます。
+
+![Windows GUIは現在開発版です](https://img.shields.io/badge/Windows_EXE-development-yellow)
+
+GUIと切替処理はC#で実装した単体のWindows実行ファイルです。PowerShellスクリプトや追加モジュールを横に置く必要はありません。.NET Framework 4.8が必要です（通常はWindows Updateで導入済みです）。
+
+現在のEXEにはコード署名がないため、初回起動時にMicrosoft Defender SmartScreenが「不明な発行元」と表示する場合があります。Releaseには検証用の`SHA256SUMS.txt`も添付します。
+
+ソースからビルドする場合：
+
+```powershell
+dotnet build .\windows\U03ModemSwitch\U03ModemSwitch.csproj --configuration Release
+```
+
+生成物は`windows\U03ModemSwitch\bin\Release\net48\U03ModemSwitch.exe`です。push／pull request時にもGitHub Actionsがコンパイルし、`U03ModemSwitch-windows` artifactを生成します。`v*`タグによるRelease作成時はEXEがRelease assetとして自動添付されます。
+
+PowerShell CLI版を利用する場合は、`u03-modem-switch.ps1`を取得し、管理者としてWindows PowerShell 5.1以降を開いて次のように実行します。
+
+バックエンド単体の状態確認は管理者権限なしでも実行できます。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\u03-modem-switch.ps1 -Status
+```
+
+RNDIS/Web UIモードからモデムモードへ切り替える場合：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\u03-modem-switch.ps1 -ToModem
+```
+
+確認を省略する場合は`-Yes`を追加します。モデムモードからRNDISへ戻す場合は、ZTEのシリアル／モデムドライバーがインストールされ、U03のATポートがCOMポートとして表示されている必要があります。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\u03-modem-switch.ps1 -ToRndis
+```
+
+PowerShell CLI版では、WindowsがRNDISアダプターを複数検出する場合に`-InterfaceAlias "イーサネット 2"`のように指定できます。切替処理はU03側のIPv4アドレスだけを利用し、必要な場合に限り`192.168.100.3/24`を一時追加して終了時に削除します。
+
+`19d2:1484`の仮想CD-ROM状態からRNDISへ進めるUSB bulkメッセージ送信はWindows標準機能だけでは実装していません。通常はU03の仮想CD-ROMに収録されたZTEソフトウェア／ドライバーを一度起動し、`19d2:1483`になってからWindows版を実行してください。Linux版は`usb-modeswitch`で`1484`から直接処理できます。
 
 ## SMSを受信する
 
