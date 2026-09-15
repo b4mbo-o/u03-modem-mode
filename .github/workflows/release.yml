@@ -50,15 +50,21 @@ jobs:
             echo "Release $RELEASE_TAG already exists"
           else
             notes="docs/release-notes/$RELEASE_TAG.md"
+            release_kind=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              release_kind+=(--prerelease)
+            fi
             if [[ -f "$notes" ]]; then
               gh release create "$RELEASE_TAG" \
                 --verify-tag \
                 --title "$RELEASE_TAG" \
+                "${release_kind[@]}" \
                 --notes-file "$notes"
             else
               gh release create "$RELEASE_TAG" \
                 --verify-tag \
                 --title "$RELEASE_TAG" \
+                "${release_kind[@]}" \
                 --generate-notes
             fi
           fi
