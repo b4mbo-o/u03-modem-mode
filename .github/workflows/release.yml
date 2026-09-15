@@ -39,7 +39,7 @@ jobs:
             -p:Version="$version"
           mkdir -p dist
           cp windows/U03ModemSwitch/bin/Release/net48/U03ModemSwitch.exe dist/U03ModemSwitch.exe
-          sha256sum dist/U03ModemSwitch.exe > dist/SHA256SUMS.txt
+          (cd dist && sha256sum U03ModemSwitch.exe > SHA256SUMS.txt)
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
