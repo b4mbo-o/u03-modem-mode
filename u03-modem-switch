@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-readonly VERSION="0.2.0"
+readonly VERSION="0.3.0"
 readonly VENDOR_ID="19d2"
 readonly PID_STORAGE="1484"
 readonly PID_RNDIS="1483"

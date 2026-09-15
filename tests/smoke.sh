@@ -5,6 +5,7 @@ set -Eeuo pipefail
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly REPO_ROOT
 readonly TOOL="$REPO_ROOT/u03-modem-switch"
+readonly SMS_TOOL="$REPO_ROOT/u03-sms-receive"
 readonly FIXTURES="$REPO_ROOT/tests/fixtures"
 
 fail() {
@@ -17,8 +18,11 @@ assert_contains() {
     [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain: $needle"
 }
 
-[[ "$($TOOL --version)" == "0.2.0" ]] || fail "unexpected version"
+[[ "$($TOOL --version)" == "0.3.0" ]] || fail "unexpected version"
 $TOOL --help >/dev/null
+[[ "$($SMS_TOOL --version)" == "0.3.0" ]] || fail "unexpected SMS tool version"
+$SMS_TOOL --help >/dev/null
+$SMS_TOOL --selftest >/dev/null
 
 for product in 1484 1483 1481 0016; do
     output=$(U03_SYSFS_USB_ROOT="$FIXTURES/$product" "$TOOL" --status 2>&1)

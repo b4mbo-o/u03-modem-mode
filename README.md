@@ -3,7 +3,7 @@
 [![shellcheck](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/b4mbo-o/u03-modem-mode/actions/workflows/shellcheck.yml)
 [![release](https://img.shields.io/github/v/release/b4mbo-o/u03-modem-mode)](https://github.com/b4mbo-o/u03-modem-mode/releases)
 
-auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードとUSBモデムモードの間で永続的に切り替えるLinux用ツールです。元のRNDIS/Web UIモードへの復帰にも対応します。
+auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDISモードとUSBモデムモードの間で永続的に切り替えるLinux用ツールです。元のRNDIS/Web UIモードへの復帰と、モデムモードでの実験的なSMS受信にも対応します。
 
 > [!WARNING]
 > 端末内に保存されるUSB構成を変更します。au U03/MF871の実機1台で確認していますが、すべてのファームウェアを保証するものではありません。実行は自己責任でお願いします。
@@ -28,6 +28,7 @@ auのUSBデータ通信端末 **Speed USB STICK U03（ZTE MF871）** を、RNDIS
 
 - Linux（root権限とnetwork namespaceが必要）
 - Bash 4以降
+- Python 3（SMS受信機能を使う場合）
 - `curl`、`iproute2`、`coreutils`
 - CD-ROM状態から開始する場合は`usb-modeswitch`
 - `19d2:1481`対応のLinux `option` USBシリアルドライバー
@@ -87,6 +88,44 @@ sudo picocom -b 115200 /dev/ttyUSB0
 ```
 
 接続後に`AT`を入力し、`OK`が返れば認識できています。
+
+## SMSを受信する
+
+`19d2:1481`のモデムモードで、APNを設定してMODEM/PPPポートから先に回線を接続します。`u03-sms-receive`自身はAPN設定やデータ接続を行いません。
+
+空いているATポートからSMSを受信します。
+
+```console
+sudo ./u03-sms-receive
+```
+
+本ツールはAT応答があり、ほかのプロセスが使用していないU03のポートを自動選択します。明示する場合は次のように指定できます。
+
+```console
+sudo ./u03-sms-receive --port /dev/ttyUSB0
+```
+
+設定だけを適用する場合：
+
+```console
+sudo ./u03-sms-receive --setup-only
+```
+
+現在SIMにあるSMSを一度だけJSONで表示する場合：
+
+```console
+sudo ./u03-sms-receive --once --json
+```
+
+新しく見つけたSMSをパーミッション`0600`のJSON Linesファイルへ追記する場合：
+
+```console
+sudo ./u03-sms-receive --json --inbox ./u03-inbox.jsonl
+```
+
+U03実機では内蔵NV優先の初期設定だと着信SMSが保存されませんでした。本ツールはPS優先、SIM優先、store-and-notifyへ設定してこの問題を回避します。NTTドコモ網の日本通信SIMで、LTE接続中の日本語SMS受信を確認しています。
+
+SMSはSIMから自動削除しません。実機のSIM保存容量は20件だったため、満杯になる前に別途整理してください。送信元番号と本文は通常の出力および`--inbox`へ含まれるので、ファイルの取り扱いにも注意してください。
 
 ## 同じサブネットを使っている環境について
 

@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Configure and receive SMS on an au ZTE U03 in USB modem mode."""
+
+import argparse
+import fcntl
+import glob
+import hashlib
+import json
+import os
+import re
+import select
+import sys
+import termios
+import time
+import tty
+
+
+VERSION = "0.3.0"
+SUPPORTED_PRODUCTS = {"1481"}
+
+# GSM 03.38 default alphabet. ESC extension characters are handled separately.
+GSM7 = (
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ"
+    " !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿"
+    "abcdefghijklmnopqrstuvwxyzäöñüà"
+)
+GSM7_EXT = {
+    0x0A: "\f", 0x14: "^", 0x28: "{", 0x29: "}", 0x2F: "\\",
+    0x3C: "[", 0x3D: "~", 0x3E: "]", 0x40: "|", 0x65: "€",
+}
+
+
+class Error(Exception):
+    pass
+
+
+class Modem:
+    def __init__(self, path, timeout=4.0):
+        self.path = path
+        self.timeout = timeout
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            tty.setraw(self.fd)
+            attr = termios.tcgetattr(self.fd)
+            attr[2] |= termios.CLOCAL | termios.CREAD
+            attr[2] &= ~(termios.HUPCL | termios.CRTSCTS)
+            attr[4] = attr[5] = termios.B115200
+            termios.tcsetattr(self.fd, termios.TCSANOW, attr)
+        except Exception:
+            os.close(self.fd)
+            raise
+        self.buffer = b""
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def _lines(self, seconds):
+        end = time.monotonic() + seconds
+        lines = []
+        while time.monotonic() < end:
+            ready = select.select([self.fd], [], [], min(0.1, end - time.monotonic()))[0]
+            if not ready:
+                continue
+            data = os.read(self.fd, 4096)
+            if not data:
+                raise Error(f"serial device disconnected: {self.path}")
+            self.buffer += data
+            while b"\n" in self.buffer:
+                raw, self.buffer = self.buffer.split(b"\n", 1)
+                line = raw.decode("ascii", "replace").strip()
+                if line:
+                    lines.append(line)
+        return lines
+
+    def command(self, command, required=None):
+        # Drain stale unsolicited output before associating lines with a command.
+        self._lines(0.05)
+        os.write(self.fd, (command + "\r").encode("ascii"))
+        end = time.monotonic() + self.timeout
+        lines = []
+        while time.monotonic() < end:
+            lines.extend(self._lines(min(0.15, end - time.monotonic())))
+            terminal = next(
+                (line for line in lines if line in ("OK", "ERROR") or
+                 line.startswith(("+CME ERROR:", "+CMS ERROR:"))),
+                None,
+            )
+            if terminal:
+                if terminal != "OK":
+                    raise Error(f"{command} failed: {terminal}")
+                if required and not any(required in line for line in lines):
+                    raise Error(f"unexpected response to {command}: {'; '.join(lines)}")
+                return [line for line in lines if line != command and line != "OK"]
+        raise Error(f"no response to {command} on {self.path}")
+
+
+def supported_tty_ports():
+    ports = []
+    for dev in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(os.path.join(dev, "idVendor"), encoding="ascii") as f:
+                vendor = f.read().strip().lower()
+            with open(os.path.join(dev, "idProduct"), encoding="ascii") as f:
+                product = f.read().strip().lower()
+        except OSError:
+            continue
+        if vendor != "19d2" or product not in SUPPORTED_PRODUCTS:
+            continue
+        for tty_path in glob.glob(os.path.join(dev, "*", "ttyUSB*")):
+            ports.append("/dev/" + os.path.basename(tty_path))
+    return sorted(set(ports))
+
+
+def port_in_use(path):
+    name = os.path.basename(path)
+    for lock_dir in ("/run/lock", "/var/lock"):
+        lock = os.path.join(lock_dir, "LCK.." + name)
+        try:
+            with open(lock, encoding="ascii") as lock_file:
+                pid = int(lock_file.read().strip())
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
+            pass
+    for fd in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            if os.path.realpath(fd) == path and not fd.startswith(f"/proc/{os.getpid()}/"):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def open_modem(requested):
+    candidates = [requested] if requested != "auto" else supported_tty_ports()
+    if not candidates:
+        raise Error("no 19d2:1481 U03 serial ports found; enable modem mode first")
+    errors = []
+    for path in candidates:
+        if port_in_use(path):
+            errors.append(f"{path}: in use")
+            continue
+        modem = None
+        try:
+            modem = Modem(path, timeout=1.5)
+            modem.command("AT")
+            modem.timeout = 4.0
+            return modem
+        except (Error, OSError) as exc:
+            errors.append(f"{path}: {exc}")
+            if modem is not None:
+                modem.close()
+    raise Error("no available AT port (disconnect PPP from one port if needed): " + "; ".join(errors))
+
+
+def decode_digits(data, count):
+    out = ""
+    for value in data:
+        out += f"{value & 0x0f:X}"
+        if len(out) < count and value >> 4 != 0x0f:
+            out += f"{value >> 4:X}"
+    return out[:count]
+
+
+def unpack_septets(data, count, skip_bits=0):
+    values = []
+    for n in range(count):
+        bit = skip_bits + n * 7
+        byte = bit // 8
+        shift = bit % 8
+        value = (data[byte] >> shift) & 0x7f
+        if shift > 1 and byte + 1 < len(data):
+            value |= (data[byte + 1] << (8 - shift)) & 0x7f
+        values.append(value)
+    out = []
+    escaped = False
+    for value in values:
+        if escaped:
+            out.append(GSM7_EXT.get(value, "�"))
+            escaped = False
+        elif value == 0x1b:
+            escaped = True
+        else:
+            out.append(GSM7[value] if value < len(GSM7) else "�")
+    return "".join(out)
+
+
+def semi(value):
+    return f"{value & 0x0f}{value >> 4}"
+
+
+def decode_pdu(pdu):
+    data = bytes.fromhex(pdu)
+    if not data:
+        raise ValueError("empty PDU")
+    pos = 1 + data[0]
+    first = data[pos]
+    pos += 1
+    if first & 0x03 != 0:
+        raise ValueError("PDU is not SMS-DELIVER")
+
+    address_length = data[pos]
+    address_type = data[pos + 1]
+    pos += 2
+    address_bytes = (address_length + 1) // 2
+    sender_raw = data[pos:pos + address_bytes]
+    pos += address_bytes
+    sender = decode_digits(sender_raw, address_length)
+    if address_type & 0x70 == 0x10:
+        sender = "+" + sender
+
+    pid, dcs = data[pos], data[pos + 1]
+    pos += 2
+    stamp = data[pos:pos + 7]
+    pos += 7
+    timestamp = "20{}-{}-{} {}:{}:{}".format(*(semi(x) for x in stamp[:6]))
+    udl = data[pos]
+    pos += 1
+    user_data = data[pos:]
+    udhi = bool(first & 0x40)
+    header_octets = user_data[0] + 1 if udhi and user_data else 0
+
+    alphabet = dcs & 0x0c
+    if alphabet == 0x08:
+        payload = user_data[header_octets:header_octets + udl - header_octets]
+        text = payload.decode("utf-16-be", "replace")
+    elif alphabet == 0x04:
+        text = user_data[header_octets:header_octets + udl].hex().upper()
+    else:
+        header_septets = (header_octets * 8 + 6) // 7
+        fill_bits = (header_septets * 7) - (header_octets * 8)
+        text = unpack_septets(
+            user_data[header_octets:],
+            max(0, udl - header_septets),
+            fill_bits,
+        )
+    return {
+        "sender": sender,
+        "timestamp": timestamp,
+        "text": text,
+        "pid": pid,
+        "dcs": dcs,
+        "multipart": udhi,
+    }
+
+
+def messages_from_lines(lines):
+    messages = []
+    pending = None
+    for line in lines:
+        match = re.match(r'^\+CMGL:\s*(\d+),', line)
+        if match:
+            pending = int(match.group(1))
+        elif pending is not None and re.fullmatch(r"[0-9A-Fa-f]+", line):
+            messages.append((pending, line.upper()))
+            pending = None
+    return messages
+
+
+def configure_sms(modem):
+    modem.command("ATE0")
+    modem.command("AT+CPIN?", "+CPIN: READY")
+    modem.command("AT+CMGF=0")
+    modem.command("AT+CGSMS=2")
+    modem.command("AT+ZSMSD=1")
+    modem.command('AT+CPMS="SM","SM","SM"')
+    modem.command("AT+CNMI=1,1,0,0,0")
+    value = modem.command("AT+ZSMSD?")
+    if not any("+ZSMSD: 1" in line for line in value):
+        raise Error("U03 did not retain SIM-first SMS storage")
+
+
+def append_inbox(path, record):
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def selftest():
+    # Synthetic SMS-DELIVER: +819012345678, 2026-09-15 15:01:45, "テスト".
+    pdu = "00000C911809214365870008629051511054000630C630B930C8"
+    decoded = decode_pdu(pdu)
+    assert decoded["sender"] == "+819012345678"
+    assert decoded["timestamp"] == "2026-09-15 15:01:45"
+    assert decoded["text"] == "テスト"
+    assert messages_from_lines(["+CMGL: 7,0,,25", pdu, "OK"]) == [(7, pdu)]
+    assert unpack_septets(bytes.fromhex("E8329BFD06"), 5) == "hello"
+    print("SMS parser self-test passed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", default="auto", help="AT port (default: auto)")
+    parser.add_argument("--interval", type=float, default=5.0, help="poll interval in seconds")
+    parser.add_argument("--once", action="store_true", help="list current messages and exit")
+    parser.add_argument("--setup-only", action="store_true", help="apply SMS settings and exit")
+    parser.add_argument("--no-setup", action="store_true", help="do not change SMS settings")
+    parser.add_argument("--json", action="store_true", help="emit one JSON object per message")
+    parser.add_argument("--raw", action="store_true", help="include raw PDU in output")
+    parser.add_argument("--inbox", help="append new messages to a mode-0600 JSONL file")
+    parser.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--version", action="version", version=VERSION)
+    args = parser.parse_args()
+    if args.selftest:
+        selftest()
+        return
+    if args.interval <= 0:
+        parser.error("--interval must be greater than zero")
+
+    seen = set()
+    saved_hashes = set()
+    if args.inbox:
+        try:
+            with open(args.inbox, encoding="utf-8") as inbox:
+                for line in inbox:
+                    try:
+                        saved_hashes.add(json.loads(line)["pdu_sha256"])
+                    except (KeyError, json.JSONDecodeError):
+                        pass
+        except FileNotFoundError:
+            pass
+    with open_modem(args.port) as modem:
+        print(f"[u03-sms] using {modem.path}", file=sys.stderr)
+        if not args.no_setup:
+            configure_sms(modem)
+            print("[u03-sms] SMS configured: PS preferred, SIM storage, store-and-notify", file=sys.stderr)
+        if args.setup_only:
+            return
+        try:
+            registration = modem.command("AT+CEREG?")
+            if not any(re.search(r"\+CEREG:\s*\d,[15]", line) for line in registration):
+                print("[u03-sms] warning: not registered on LTE; start the data connection", file=sys.stderr)
+            while True:
+                for index, pdu in messages_from_lines(modem.command("AT+CMGL=4")):
+                    key = (index, pdu)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        record = {"index": index, **decode_pdu(pdu)}
+                    except (ValueError, IndexError) as exc:
+                        record = {"index": index, "decode_error": str(exc)}
+                    pdu_hash = hashlib.sha256(bytes.fromhex(pdu)).hexdigest()
+                    record["pdu_sha256"] = pdu_hash
+                    if args.raw:
+                        record["pdu"] = pdu
+                    if args.json:
+                        print(json.dumps(record, ensure_ascii=False), flush=True)
+                    else:
+                        print(f"[{record.get('timestamp', '?')}] {record.get('sender', '?')}: {record.get('text', '<decode failed>')}", flush=True)
+                    if args.inbox and pdu_hash not in saved_hashes:
+                        append_inbox(args.inbox, record)
+                        saved_hashes.add(pdu_hash)
+                if args.once:
+                    break
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Error, OSError) as exc:
+        print(f"[u03-sms] error: {exc}", file=sys.stderr)
+        sys.exit(1)

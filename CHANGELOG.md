@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-09-15
+
+- Add `u03-sms-receive` to configure and read SMS in modem mode.
+- Work around the U03 internal-NV receive failure by selecting SIM-first SMS storage.
+- Prefer packet-switched SMS and use store-and-notify routing compatible with the U03.
+- Decode GSM 7-bit and UCS-2 SMS-DELIVER PDUs without third-party Python packages.
+- Keep messages on the SIM and optionally append them to a private JSONL inbox.
+
 ## 0.2.0 - 2026-09-15
 
 - Add `--to-rndis` to restore the persistent RNDIS/Web UI mode from `19d2:1481`.

@@ -17,6 +17,7 @@ jobs:
       - name: Check shell syntax
         run: |
           bash -n u03-modem-switch
+          python3 -m py_compile u03-sms-receive
           shellcheck u03-modem-switch
           shellcheck tests/smoke.sh
       - name: Smoke test CLI
